@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "id": "tcxc.voice-shield",
+  "name": "Open Voice Shield",
+  "version": "1.0.0",
+  "author": "TelecomsXChange",
+  "license": "MIT",
+  "description": "Open Voice Shield call-fraud verdicts, live SIP calls, and route health in the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Open Voice Shield",
+    "description": "Fraud verdicts, live calls, and spend from Open Voice Shield.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 60,
+      "days": 7,
+      "notifyHighRisk": true,
+      "highRiskThreshold": 70,
+      "maskNumbers": true
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 15,
+        "max": 3600,
+        "step": 15,
+        "defaultValue": 60
+      },
+      {
+        "key": "days",
+        "type": "integer",
+        "label": "Reporting window (days)",
+        "min": 1,
+        "max": 90,
+        "step": 1,
+        "defaultValue": 7
+      },
+      {
+        "key": "notifyHighRisk",
+        "type": "boolean",
+        "label": "Notify on new high-risk verdict",
+        "defaultValue": true
+      },
+      {
+        "key": "highRiskThreshold",
+        "type": "integer",
+        "label": "High-risk threshold (%)",
+        "min": 1,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 70
+      },
+      {
+        "key": "maskNumbers",
+        "type": "boolean",
+        "label": "Mask phone numbers",
+        "defaultValue": true
+      }
+    ]
+  }
+}

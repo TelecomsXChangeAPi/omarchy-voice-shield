@@ -1,0 +1,3 @@
+# The API key lives in ~/.config/omarchy/ovs.json, never in the plugin.
+ovs.json
+*.local
