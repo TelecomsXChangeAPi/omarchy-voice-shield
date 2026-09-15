@@ -72,6 +72,24 @@ omarchy plugin enable tcxc.voice-shield --section right
 
 Requires `curl` and `jq` (`omarchy pkg add jq`).
 
+## Update
+
+```bash
+omarchy plugin update tcxc.voice-shield
+```
+
+## Remove
+
+```bash
+omarchy plugin remove tcxc.voice-shield
+rm ~/.config/omarchy/ovs.json   # optional: delete the stored API key
+```
+
+Removing the plugin takes it off the bar and deletes its directory. The plugin
+itself writes no files, so the only thing left behind is the `ovs.json` you
+created; delete it too if you are done with the key, and revoke
+the key in the OVS dashboard under **API keys**.
+
 ## Configure
 
 Mint an API key in the OVS dashboard under **API keys**, then:
