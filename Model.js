@@ -401,6 +401,179 @@ function notificationBody(call, mask) {
   return parts.join("  ·  ")
 }
 
+// ------------------------------------------------------------- test calls
+
+// The two speech samples the platform can play down the line. "route_test" is
+// a neutral announcement and answers "does this route carry audio"; the scam
+// script answers the more useful question — "does a verdict actually come
+// back on this trunk" — by giving the analyser something it must flag.
+var SPEECH_SAMPLES = [
+  { value: "route_test", label: "Route test",
+    tooltip: "A neutral announcement — checks the route completes and carries audio" },
+  { value: "scam_sample", label: "Scam sample",
+    tooltip: "A known card-services scam script — checks a block verdict comes back" }
+]
+
+function speechOptions() {
+  return SPEECH_SAMPLES
+}
+
+function speechLabel(value) {
+  for (var i = 0; i < SPEECH_SAMPLES.length; i++) {
+    if (SPEECH_SAMPLES[i].value === String(value)) return SPEECH_SAMPLES[i].label
+  }
+  return String(value || "")
+}
+
+// Numbers get typed with the spaces, dashes and brackets people actually use.
+// Strip them down to what the API accepts (^\+?[0-9*#]{2,32}$) rather than
+// rejecting a number that is perfectly dialable once punctuation is gone. A +
+// is kept only in the leading position.
+function normalizeNumber(text) {
+  var raw = String(text || "").replace(/[^\d+*#]/g, "")
+  var plus = raw.charAt(0) === "+"
+  return (plus ? "+" : "") + raw.replace(/\+/g, "")
+}
+
+function validTestNumber(text) {
+  return /^\+?[0-9*#]{2,32}$/.test(normalizeNumber(text))
+}
+
+function testStatus(test) {
+  return test && test.status ? String(test.status).toLowerCase() : ""
+}
+
+// Terminal states stop the poll timer. An unrecognised status counts as still
+// in flight: if the platform adds a state, the widget keeps polling to the
+// real end rather than freezing on a word it cannot interpret.
+function testDone(test) {
+  switch (testStatus(test)) {
+    case "done":
+    case "completed":
+    case "failed":
+    case "error":
+    case "cancelled":
+    case "canceled":
+      return true
+    default:
+      return false
+  }
+}
+
+function testFailed(test) {
+  if (!test) return false
+  var s = testStatus(test)
+  if (s === "failed" || s === "error") return true
+  return !!test.error
+}
+
+function testStatusLabel(test) {
+  if (!test) return "PLACING"
+  switch (testStatus(test)) {
+    case "queued": return "QUEUED"
+    case "dialing": return "DIALING"
+    case "ringing": return "RINGING"
+    case "answered":
+    case "talking":
+    case "in_progress": return "IN PROGRESS"
+    case "done":
+    case "completed": return test.answered === false ? "NOT ANSWERED" : "DONE"
+    case "failed":
+    case "error": return "FAILED"
+    case "cancelled":
+    case "canceled": return "CANCELLED"
+    default:
+      var s = testStatus(test)
+      return s ? s.toUpperCase().replace(/[_-]+/g, " ") : "PLACING"
+  }
+}
+
+// What the SIP leg actually did, in the order an operator reads it: the
+// response code, then how long audio really flowed, then who hung up. A test
+// call that answers 200 and carries zero seconds of audio is a different
+// problem from one that never answered, and only these two fields say which.
+function testDetail(test) {
+  if (!test) return ""
+  var parts = []
+  if (test.sip_code) {
+    parts.push(String(test.sip_code) + (test.sip_reason ? " " + String(test.sip_reason) : ""))
+  }
+  var talk = parseFloat(String(test.talk_seconds))
+  if (!isNaN(talk) && talk > 0) parts.push(Math.round(talk) + "s talk")
+  if (test.ended_by) parts.push("ended by " + String(test.ended_by))
+  if (test.error) parts.push(String(test.error))
+  return parts.join("  ·  ")
+}
+
+// Shares the panel's severity scale: 2 urgent, 1 accent, 0 quiet. A call in
+// flight sits at 1 so the card reads as live rather than as finished-and-fine.
+function testSeverity(test) {
+  if (!test) return 1
+  if (testFailed(test)) return 2
+  if (!testDone(test)) return 1
+  return test.answered === false ? 1 : 0
+}
+
+// The analysed call behind a finished test, if the platform has linked one yet.
+function testCallId(test) {
+  return test && test.call_id ? String(test.call_id) : ""
+}
+
+function testErrorLabel(code) {
+  switch (String(code || "")) {
+    case "bad-number": return "That number can't be dialled"
+    case "bad-mode": return "Bad request"
+    case "no-test-id": return "No test call to poll"
+    // Anything else is either a shared error code or the API's own refusal
+    // text ("no destination configured"), which is worth showing verbatim.
+    default: return errorLabel(code)
+  }
+}
+
+function testNotificationBody(test, mask) {
+  var parts = [fmtNumber(test ? test.number : "", mask), testStatusLabel(test)]
+  var detail = testDetail(test)
+  if (detail) parts.push(detail)
+  return parts.join("  ·  ")
+}
+
+// ----------------------------------------------------------- destinations
+
+function parseDestinations(raw) {
+  var res = parseSnapshot(raw)
+  if (!res || res.ok !== true || !res.destinations) return []
+  return res.destinations
+}
+
+function destinationLabel(dest) {
+  if (!dest) return "default destination"
+  if (dest.label) return String(dest.label)
+  var host = String(dest.host || "")
+  if (!host) return "destination"
+  return host + (dest.port ? ":" + dest.port : "")
+    + (dest.transport ? " " + String(dest.transport).toUpperCase() : "")
+}
+
+function destinationId(dest) {
+  return dest && dest.id ? String(dest.id) : ""
+}
+
+// The monitor's view of the destination, so the composer can say the route is
+// down before the call is placed rather than after it fails.
+function destinationUp(dest) {
+  return !dest || String(dest.monitor_status || "unknown") !== "down"
+}
+
+// Land on the account's default destination — the one the API would pick
+// anyway if destination_id were omitted.
+function defaultDestinationIndex(list) {
+  if (!list || !list.length) return -1
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].is_default) return i
+  }
+  return 0
+}
+
 // ---------------------------------------------------------------------- pill
 
 function pillText(snap, glyph, alertGlyph) {
@@ -463,6 +636,24 @@ if (typeof module !== "undefined") {
     unannouncedHighRisk: unannouncedHighRisk,
     rememberIds: rememberIds,
     notificationBody: notificationBody,
+    speechOptions: speechOptions,
+    speechLabel: speechLabel,
+    normalizeNumber: normalizeNumber,
+    validTestNumber: validTestNumber,
+    testStatus: testStatus,
+    testDone: testDone,
+    testFailed: testFailed,
+    testStatusLabel: testStatusLabel,
+    testDetail: testDetail,
+    testSeverity: testSeverity,
+    testCallId: testCallId,
+    testErrorLabel: testErrorLabel,
+    testNotificationBody: testNotificationBody,
+    parseDestinations: parseDestinations,
+    destinationLabel: destinationLabel,
+    destinationId: destinationId,
+    destinationUp: destinationUp,
+    defaultDestinationIndex: defaultDestinationIndex,
     pillText: pillText,
     tooltipText: tooltipText
   }

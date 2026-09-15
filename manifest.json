@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "tcxc.voice-shield",
   "name": "Open Voice Shield",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "TelecomsXChange",
   "license": "MIT",
-  "description": "Open Voice Shield call-fraud verdicts, live SIP calls, and route health in the Omarchy bar.",
+  "description": "Open Voice Shield call-fraud verdicts, live SIP calls, route health and test calls in the Omarchy bar.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Open Voice Shield",
-    "description": "Fraud verdicts, live calls, and spend from Open Voice Shield.",
+    "description": "Fraud verdicts, live calls, spend and test calls from Open Voice Shield.",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -23,7 +23,9 @@
       "days": 7,
       "notifyHighRisk": true,
       "highRiskThreshold": 70,
-      "maskNumbers": true
+      "maskNumbers": true,
+      "testCalls": true,
+      "testCallSeconds": 30
     },
     "schema": [
       {
@@ -64,6 +66,21 @@
         "type": "boolean",
         "label": "Mask phone numbers",
         "defaultValue": true
+      },
+      {
+        "key": "testCalls",
+        "type": "boolean",
+        "label": "Allow placing test calls",
+        "defaultValue": true
+      },
+      {
+        "key": "testCallSeconds",
+        "type": "integer",
+        "label": "Test call length (seconds)",
+        "min": 5,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 30
       }
     ]
   }

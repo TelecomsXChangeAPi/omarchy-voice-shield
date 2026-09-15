@@ -54,19 +54,46 @@ Panel {
   // screenshots, so full subscriber numbers are opt-in, not the default.
   readonly property bool maskNumbers: setting("maskNumbers", true) !== false
 
+  // Test calls: the platform dials a number through one of the account's
+  // destinations, plays a speech sample, and analyses the result like any
+  // other call. Switchable off, because a shared or kiosk desktop has no
+  // business being able to dial out.
+  readonly property bool testCallsEnabled: setting("testCalls", true) !== false
+  readonly property int testCallSeconds: Math.min(600, Math.max(5, parseInt(setting("testCallSeconds", 30), 10) || 30))
+
+  property bool composing: false
+  property string testNumber: ""
+  property string testSpeech: "route_test"
+  property var destinations: []
+  property int destIndex: -1
+  property var testCall: null
+  property string testError: ""
+  property bool placing: false
+  // Two presses to dial. One stray click in a bar panel should not put a call
+  // on a stranger's phone and a charge on the account.
+  property bool armed: false
+  property int testPolls: 0
+
   readonly property bool healthy: snap && snap.ok === true
   readonly property var liveCalls: healthy ? Model.liveItems(snap, 3) : []
   readonly property var verdicts: healthy ? Model.highRiskItems(snap, 4) : []
   readonly property var segments: healthy ? Model.riskSegments(snap) : []
   readonly property var bars: healthy ? Model.sparkBars(snap) : []
 
+  readonly property var selectedDestination: destIndex >= 0 && destIndex < destinations.length
+    ? destinations[destIndex] : null
+  readonly property bool canPlace: testCallsEnabled && healthy && !placing && Model.validTestNumber(testNumber)
+
   // Absolute path to the fetch helper, derived from this file's own location
   // so the plugin works from any install path (git clone, XDG config, a
   // checkout under /tmp for testing).
-  readonly property string scriptPath: {
-    var url = Qt.resolvedUrl("ovs-fetch").toString()
+  function pluginScript(name) {
+    var url = Qt.resolvedUrl(name).toString()
     return url.indexOf("file://") === 0 ? url.substring(7) : url
   }
+
+  readonly property string scriptPath: pluginScript("ovs-fetch")
+  readonly property string testScriptPath: pluginScript("ovs-test-call")
 
   function severityColor(level) {
     if (level >= 2) return Color.urgent
@@ -149,6 +176,113 @@ Panel {
     openCall(verdicts[cursorIndex])
   }
 
+  // ------------------------------------------------------------ test calls
+
+  function openComposer() {
+    if (!testCallsEnabled) return
+    composing = true
+    armed = false
+    testError = ""
+    // Destinations are only worth a round trip once someone actually wants to
+    // dial, so they stay out of the once-a-minute snapshot.
+    if (destinations.length === 0 && !destProc.running) destProc.running = true
+    Qt.callLater(function() { numberField.forceActiveFocus() })
+  }
+
+  function closeComposer() {
+    composing = false
+    armed = false
+    armTimer.stop()
+    Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+  }
+
+  function toggleComposer() {
+    if (composing) closeComposer()
+    else openComposer()
+  }
+
+  function cycleDestination() {
+    if (destinations.length < 2) return
+    destIndex = (destIndex + 1) % destinations.length
+    armed = false
+  }
+
+  function applyDestinations(raw) {
+    destinations = Model.parseDestinations(raw)
+    if (destIndex < 0 || destIndex >= destinations.length) {
+      destIndex = Model.defaultDestinationIndex(destinations)
+    }
+  }
+
+  // First press arms, second press dials. The armed state lapses on its own,
+  // so a panel left open never sits one click away from placing a call.
+  function placeTestCall() {
+    if (!canPlace) return
+    if (!armed) {
+      armed = true
+      armTimer.restart()
+      return
+    }
+
+    armed = false
+    armTimer.stop()
+    placing = true
+    testError = ""
+    testCall = null
+    testPolls = 0
+
+    // The number goes in the environment rather than in argv: /proc/PID/cmdline
+    // is world-readable and /proc/PID/environ is not.
+    placeProc.environment = {
+      "OVS_NUMBER": Model.normalizeNumber(testNumber),
+      "OVS_SECONDS": String(testCallSeconds),
+      "OVS_SPEECH": testSpeech,
+      "OVS_DEST_ID": Model.destinationId(selectedDestination)
+    }
+    placeProc.running = true
+  }
+
+  function applyTestResult(raw, fromPlace) {
+    if (fromPlace) placing = false
+    var res = Model.parseSnapshot(raw)
+
+    if (!res || res.ok !== true) {
+      testError = Model.testErrorLabel(res ? res.error : "")
+      // A failed poll leaves the card as it stands — the call is still out
+      // there, and the next tick may well reach it. A failed placement has
+      // no call to leave.
+      if (fromPlace) testCall = null
+      return
+    }
+
+    testError = ""
+    var wasDone = Model.testDone(testCall)
+    testCall = res.test
+
+    if (Model.testDone(testCall) && !wasDone) {
+      // A finished test call is an analysed call; pull it into the panel so
+      // its verdict lands in the list with everything else.
+      refresh()
+      if (!opened) announceTest(testCall)
+    }
+  }
+
+  function announceTest(test) {
+    Quickshell.execDetached([
+      "omarchy-notification-send",
+      "--app-name", "voice-shield",
+      "-u", Model.testFailed(test) ? "critical" : "normal",
+      "-g", root.phoneGlyph,
+      "Open Voice Shield — test call",
+      Model.testNotificationBody(test, root.maskNumbers)
+    ])
+  }
+
+  function openTestVerdict() {
+    var id = Model.testCallId(testCall)
+    if (id) openCall({ id: id })
+  }
+
   IpcHandler {
     target: "tcxc.voice-shield"
 
@@ -158,12 +292,16 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): void { root.refresh() }
+    // Opens the panel with the composer focused. Deliberately stops there: a
+    // keybinding may summon the dialer, never place the call.
+    function dialer(): void { root.open(); root.openComposer() }
   }
 
   onOpenedChanged: {
     if (!opened) return
     cursorActive = false
     cursorIndex = 0
+    armed = false
     refresh()
   }
 
@@ -177,6 +315,55 @@ Panel {
       waitForEnd: true
       onStreamFinished: root.applySnapshot(text)
     }
+  }
+
+  Process {
+    id: placeProc
+    command: ["bash", root.testScriptPath, "place"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyTestResult(text, true)
+    }
+  }
+
+  Process {
+    id: pollProc
+    command: ["bash", root.testScriptPath, "poll"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyTestResult(text, false)
+    }
+  }
+
+  Process {
+    id: destProc
+    command: ["bash", root.testScriptPath, "destinations"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyDestinations(text)
+    }
+  }
+
+  // Follows a placed call to its end whether or not the panel is open, and
+  // gives up after 15 minutes rather than polling a stuck record forever.
+  Timer {
+    id: pollTimer
+    interval: 5000
+    repeat: true
+    running: root.testCall !== null && !Model.testDone(root.testCall) && root.testPolls < 180
+    onTriggered: {
+      if (pollProc.running) return
+      root.testPolls += 1
+      pollProc.environment = { "OVS_TEST_ID": String(root.testCall.id) }
+      pollProc.running = true
+    }
+  }
+
+  // The confirmation is about the number that was on screen when it was given.
+  Timer {
+    id: armTimer
+    interval: 5000
+    onTriggered: root.armed = false
   }
 
   // Background poll: the pill and the high-risk notifications have to stay
@@ -234,6 +421,9 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // While the composer is up the number field owns the keyboard, Escape
+      // and Enter included.
+      blocked: root.composing
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dy !== 0 ? dy : dx)
@@ -856,6 +1046,227 @@ Panel {
           }
         }
 
+        // ---------- Test call ----------
+        // The platform dials a number through one of the account's
+        // destinations and plays a speech sample down the line; the result
+        // comes back as an ordinary analysed call. "Scam sample" is the one
+        // that answers the question worth asking — not "does this route
+        // work" but "does a verdict actually come back on it".
+        PanelSeparator {
+          visible: testSection.visible
+          foreground: root.fg
+        }
+
+        Column {
+          id: testSection
+          visible: root.testCallsEnabled && (root.composing || root.testCall !== null || root.testError !== "")
+          width: parent.width
+          spacing: Style.space(8)
+
+          PanelSectionHeader {
+            text: "TEST CALL"
+            foreground: root.fg
+            fontFamily: root.face
+          }
+
+          // ---- the number, and the two presses that dial it ----
+          Item {
+            visible: root.composing
+            width: parent.width
+            implicitHeight: Math.max(numberField.implicitHeight, placeButton.implicitHeight)
+
+            TextField {
+              id: numberField
+              anchors.left: parent.left
+              anchors.right: placeButton.left
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              enabled: !root.placing
+              placeholderText: "Number to dial"
+              foreground: root.fg
+              accent: Color.accent
+              font.family: root.face
+              font.pixelSize: Style.font.bodySmall
+
+              // Editing disarms: a confirmation belongs to the digits that
+              // were on screen when it was given, not to whatever is there
+              // by the time the second press lands.
+              onTextChanged: {
+                root.testNumber = text
+                root.armed = false
+              }
+
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Escape) {
+                  root.closeComposer()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                  root.placeTestCall()
+                  event.accepted = true
+                }
+              }
+            }
+
+            Button {
+              id: placeButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              enabled: root.canPlace
+              opacity: root.canPlace ? 1.0 : 0.45
+              iconText: root.armed ? root.alertGlyph : root.phoneGlyph
+              iconSize: Style.font.title
+              iconSpinning: root.placing
+              text: root.placing ? "Placing" : (root.armed ? "Confirm" : "Call")
+              fontSize: Style.font.bodySmall
+              foreground: root.armed ? Color.urgent : root.fg
+              accent: root.armed ? Color.urgent : Color.accent
+              fontFamily: root.face
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              tooltipText: root.armed ? "Press again to dial" : "Place a test call"
+              onClicked: root.placeTestCall()
+            }
+          }
+
+          // ---- which sample plays down the line ----
+          ButtonGroup {
+            visible: root.composing
+            width: parent.width
+            options: Model.speechOptions()
+            value: root.testSpeech
+            foreground: root.fg
+            accent: Color.accent
+            fontFamily: root.face
+            fontSize: Style.font.caption
+            focusable: false
+            onChanged: function(value) {
+              root.testSpeech = value
+              root.armed = false
+            }
+          }
+
+          // ---- where it goes and what it costs, before it is placed ----
+          Text {
+            visible: root.composing
+            width: parent.width
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: {
+              var parts = []
+              if (root.selectedDestination) {
+                parts.push("via " + Model.destinationLabel(root.selectedDestination))
+                if (!Model.destinationUp(root.selectedDestination)) parts.push("ROUTE DOWN")
+              }
+              parts.push(root.testCallSeconds + "s")
+              parts.push("billed per second")
+              if (root.destinations.length > 1) parts.push("tap to change route")
+              return parts.join("  ·  ")
+            }
+            color: root.selectedDestination && !Model.destinationUp(root.selectedDestination)
+              ? Color.urgent : root.dim
+            font.family: root.face
+            font.pixelSize: Style.font.caption
+
+            HoverHandler {
+              cursorShape: root.destinations.length > 1 ? Qt.PointingHandCursor : Qt.ArrowCursor
+            }
+            TapHandler {
+              onTapped: root.cycleDestination()
+            }
+          }
+
+          // ---- the call itself, from queued through to its verdict ----
+          Rectangle {
+            id: testCard
+            visible: root.testCall !== null || root.testError !== ""
+            readonly property color tone: root.testError !== ""
+              ? Color.urgent
+              : root.severityColor(Model.testSeverity(root.testCall))
+
+            width: parent.width
+            implicitHeight: testBody.implicitHeight + Style.space(16)
+            radius: Style.cornerRadius
+            color: Qt.rgba(tone.r, tone.g, tone.b, 0.06)
+
+            Rectangle {
+              anchors.left: parent.left
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
+              width: Style.space(2)
+              radius: width
+              color: testCard.tone
+              opacity: 0.85
+            }
+
+            Column {
+              id: testBody
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.leftMargin: Style.space(12)
+              anchors.rightMargin: Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(5)
+
+              Item {
+                width: parent.width
+                implicitHeight: Math.max(testState.implicitHeight, verdictButton.implicitHeight)
+
+                Text {
+                  id: testState
+                  anchors.left: parent.left
+                  anchors.right: verdictButton.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: root.testError !== "" ? root.testError : Model.testStatusLabel(root.testCall)
+                  color: testCard.tone
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  font.letterSpacing: 1.0
+                  elide: Text.ElideRight
+                }
+
+                Button {
+                  id: verdictButton
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: Model.testCallId(root.testCall) !== ""
+                  text: "Verdict"
+                  iconText: "󰍉"
+                  iconSize: Style.font.body
+                  fontSize: Style.font.caption
+                  foreground: root.fg
+                  fontFamily: root.face
+                  horizontalPadding: Style.spacing.controlPaddingX
+                  verticalPadding: Style.space(2)
+                  bordered: true
+                  onClicked: root.openTestVerdict()
+                }
+              }
+
+              Text {
+                visible: root.testCall !== null
+                width: parent.width
+                textFormat: Text.PlainText
+                text: {
+                  if (!root.testCall) return ""
+                  var parts = [Model.fmtNumber(root.testCall.number, root.maskNumbers),
+                               Model.speechLabel(root.testCall.speech)]
+                  var detail = Model.testDetail(root.testCall)
+                  if (detail) parts.push(detail)
+                  return parts.join("  ·  ")
+                }
+                color: root.dim
+                font.family: root.face
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+            }
+          }
+        }
+
         // ---------- Actions ----------
         PanelSeparator { foreground: root.fg }
 
@@ -864,7 +1275,8 @@ Panel {
           width: parent.width
           spacing: Style.space(6)
 
-          readonly property real cellWidth: (width - spacing) / 2
+          readonly property int cells: root.testCallsEnabled ? 3 : 2
+          readonly property real cellWidth: (width - spacing * (cells - 1)) / cells
 
           Button {
             width: actionRow.cellWidth
@@ -878,6 +1290,24 @@ Panel {
             verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
             bordered: true
             onClicked: root.openDashboard()
+          }
+
+          Button {
+            visible: root.testCallsEnabled
+            enabled: root.healthy
+            opacity: root.healthy ? 1.0 : 0.45
+            width: actionRow.cellWidth
+            iconText: root.phoneGlyph
+            iconSize: Style.font.title
+            text: "Test call"
+            selected: root.composing
+            fontSize: Style.font.bodySmall
+            foreground: root.fg
+            fontFamily: root.face
+            horizontalPadding: Style.spacing.controlPaddingX
+            verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+            bordered: true
+            onClicked: root.toggleComposer()
           }
 
           Button {

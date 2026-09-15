@@ -6,35 +6,19 @@
 #   {"ok":true,  "dashboard":{...}, "live":{...}}
 #   {"ok":false, "error":"no-key"}
 #
-# The API key is read from the config file rather than passed in argv, so it
-# never shows up in the process table.
+# Config, auth and the HTTP helpers live in ovs-lib.sh, shared with
+# ovs-test-call. The API key is read from the config file rather than passed
+# in argv, so it never shows up in the process table.
 
 set -uo pipefail
 
-CONFIG="${OVS_CONFIG:-$HOME/.config/omarchy/ovs.json}"
-DEFAULT_BASE="https://ovs.telecomsxchange.com/api"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/ovs-lib.sh"
+ovs_load_config
 
-fail() { jq -nc --arg e "$1" '{ok: false, error: $e}'; exit 0; }
+dash=$(ovs_get "/customer/dashboard?days=$days")
+jq -e . <<<"$dash" >/dev/null 2>&1 || ovs_fail "unreachable"
 
-command -v jq >/dev/null 2>&1 || { printf '{"ok":false,"error":"jq-missing"}\n'; exit 0; }
-command -v curl >/dev/null 2>&1 || fail "curl-missing"
-[[ -r "$CONFIG" ]] || fail "no-config"
-jq -e . "$CONFIG" >/dev/null 2>&1 || fail "bad-config"
-
-key=$(jq -r '.apiKey // empty' "$CONFIG")
-[[ -n "$key" ]] || fail "no-key"
-
-base=$(jq -r --arg d "$DEFAULT_BASE" '.baseUrl // $d' "$CONFIG")
-base="${base%/}"
-days=$(jq -r '.days // 7' "$CONFIG")
-[[ "$days" =~ ^[0-9]+$ ]] || days=7
-
-get() { curl -sS --max-time 12 -H "X-API-Key: $key" "$base$1" 2>/dev/null; }
-
-dash=$(get "/customer/dashboard?days=$days")
-jq -e . <<<"$dash" >/dev/null 2>&1 || fail "unreachable"
-
-live=$(get "/customer/live-calls")
+live=$(ovs_get "/customer/live-calls")
 jq -e . <<<"$live" >/dev/null 2>&1 || live="null"
 
 jq -nc --argjson d "$dash" --argjson l "$live" '
