@@ -6,6 +6,12 @@ call you can place down a route without leaving the desktop.
 
 By TelecomsXChange.
 
+<p align="center">
+  <img src="preview.png" alt="Open Voice Shield panel open under the Omarchy bar: calls today, risk distribution, weekly volume, live calls and recent fraud verdicts" width="428">
+</p>
+
+<sub>Screenshot uses demo data; numbers are from reserved fictional ranges.</sub>
+
 ## What it shows
 
 **Bar pill.** A shield glyph that stays quiet while nothing is wrong. It badges
