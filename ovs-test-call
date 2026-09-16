@@ -8,11 +8,12 @@
 # Each mode prints one JSON object and exits 0:
 #   {"ok":true,"test":{...}} | {"ok":true,"destinations":[...]} | {"ok":false,"error":"…"}
 #
-# The dialled number arrives in the environment rather than in argv.
+# The dialled number arrives in the environment rather than in argv, and from
+# there reaches jq and curl on stdin — as do the API's answers, which repeat it.
 # /proc/PID/cmdline is world-readable and /proc/PID/environ is not, and the
 # number somebody is calling is not something to hand to every other process
 # on the machine. The API key is passed neither way — ovs-lib.sh reads it from
-# the config file.
+# the config file and hands it to curl through a pipe.
 
 set -uo pipefail
 
@@ -31,7 +32,7 @@ emit_test() {
   jq -e . <<<"$body" >/dev/null 2>&1 || ovs_fail "unreachable"
 
   case "$code" in
-    2*) jq -nc --argjson t "$body" '{ok: true, test: $t}' ;;
+    2*) printf '%s' "$body" | jq -nc '{ok: true, test: input}' ;;
     *)
       msg=$(ovs_error_message "$body")
       ovs_fail "${msg:-http-$code}"
@@ -43,7 +44,8 @@ case "${1:-}" in
   destinations)
     body=$(ovs_get "/customer/destinations")
     jq -e . <<<"$body" >/dev/null 2>&1 || ovs_fail "unreachable"
-    jq -nc --argjson d "$body" '
+    printf '%s' "$body" | jq -nc '
+      input as $d |
       if ($d | type) == "array" then { ok: true, destinations: $d }
       else { ok: false, error: (($d.detail? // $d.error? // "api-error") | tostring) }
       end
@@ -65,13 +67,13 @@ case "${1:-}" in
     dest="${OVS_DEST_ID:-}"
 
     # destination_id is omitted rather than sent empty, which is what makes the
-    # platform fall back to the account's default destination.
-    payload=$(jq -nc \
-      --arg n "$number" \
+    # platform fall back to the account's default destination. The number is
+    # jq's raw input, not an --arg, which would put it straight back into argv.
+    payload=$(printf '%s' "$number" | jq -Rsc \
       --argjson s "$seconds" \
       --arg sp "$speech" \
       --arg d "$dest" '
-      { number: $n, seconds: $s, speech: $sp }
+      { number: ., seconds: $s, speech: $sp }
       + (if $d == "" then {} else { destination_id: $d } end)
     ')
 
@@ -86,7 +88,8 @@ case "${1:-}" in
 
     body=$(ovs_get "/customer/test-calls/$id")
     jq -e . <<<"$body" >/dev/null 2>&1 || ovs_fail "unreachable"
-    jq -nc --argjson t "$body" '
+    printf '%s' "$body" | jq -nc '
+      input as $t |
       if ($t | type) == "object" and $t.id != null then { ok: true, test: $t }
       else { ok: false, error: (($t.detail? // $t.error? // "api-error") | tostring) }
       end

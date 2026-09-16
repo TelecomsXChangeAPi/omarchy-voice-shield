@@ -108,8 +108,8 @@ EOF
 chmod 600 ~/.config/omarchy/ovs.json
 ```
 
-The key is read from this file by `ovs-fetch`, never passed on a command line,
-so it stays out of the process table.
+The helpers read the key from this file and hand it to `curl` through a pipe,
+never on a command line, so it stays out of the process table.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -186,10 +186,19 @@ widget stays at two calls a minute:
 - `GET /customer/test-calls/{id}` — every 5s until the call reaches a terminal
   state, and at most 180 times, so a stuck record is not polled forever
 
-All authenticate with `X-API-Key`. The dialled number is passed to
-`ovs-test-call` in the environment rather than in argv: `/proc/PID/cmdline` is
-world-readable and `/proc/PID/environ` is not, and a number someone is calling
-is not something to hand to every other process on the machine.
+All authenticate with `X-API-Key`. Nothing sensitive is ever passed in argv,
+which `/proc/PID/cmdline` makes readable to every user on the machine:
+
+- The API key reaches `curl` as a header read from an inherited pipe
+  (`-H @/dev/fd/N`, written by a shell builtin). It is in no process's argv or
+  environment and is never written to disk, so there is no temporary file to
+  clean up, however a request ends.
+- The dialled number is passed to `ovs-test-call` in the environment
+  (`/proc/PID/environ` is private to the user) and from there to `jq` and `curl`
+  on stdin. A number someone is calling is not something to hand to every other
+  process on the machine.
+- Request bodies, API responses and error text reach `curl` and `jq` on stdin
+  as well.
 
 Every response is read under a hard **256 KiB** ceiling (`OVS_MAX_BYTES`) and
 rejected outright if it exceeds it, rather than truncated — a compromised

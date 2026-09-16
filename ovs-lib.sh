@@ -5,8 +5,11 @@
 # matter what went wrong, so a QML Process never fails and the panel renders a
 # diagnosable state instead of going blank.
 #
-# The API key is read from the config file here and is never passed on a
-# command line, so it stays out of the process table.
+# Credentials, phone numbers and API response bodies never go on a command line.
+# /proc/PID/cmdline is world-readable, so any argv — curl's or jq's — can be
+# read by every local user for as long as that process runs. The API key
+# reaches curl through an inherited pipe (see ovs_curl); request bodies,
+# responses and error text reach curl and jq on stdin.
 
 OVS_CONFIG_PATH="${OVS_CONFIG:-$HOME/.config/omarchy/ovs.json}"
 OVS_DEFAULT_BASE="https://ovs.telecomsxchange.com/api"
@@ -25,7 +28,9 @@ OVS_MAX_BYTES="${OVS_MAX_BYTES:-262144}"   # 256 KiB
 # Byte length of a string, independent of locale/multibyte settings.
 ovs_bytes() { printf '%s' "$1" | LC_ALL=C wc -c; }
 
-ovs_fail() { jq -nc --arg e "$1" '{ok: false, error: $e}'; exit 0; }
+# The message can be text lifted out of an API response, so it reaches jq on
+# stdin rather than as an --arg.
+ovs_fail() { printf '%s' "$1" | jq -Rsc '{ok: false, error: .}'; exit 0; }
 
 # Sets `key`, `base` and `days` for the caller, or exits with an error object.
 ovs_load_config() {
@@ -36,11 +41,31 @@ ovs_load_config() {
 
   key=$(jq -r '.apiKey // empty' "$OVS_CONFIG_PATH")
   [[ -n "$key" ]] || ovs_fail "no-key"
+  # A key is a single token (OVS issues `ovs_` plus URL-safe base64).
+  # Whitespace, quotes or a line break can only mean a damaged config, and a
+  # line break would split the one-line header ovs_curl hands to curl in two.
+  [[ "$key" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || ovs_fail "bad-config"
 
   base=$(jq -r --arg d "$OVS_DEFAULT_BASE" '.baseUrl // $d' "$OVS_CONFIG_PATH")
   base="${base%/}"
   days=$(jq -r '.days // 7' "$OVS_CONFIG_PATH")
   [[ "$days" =~ ^[0-9]+$ ]] || days=7
+}
+
+# curl with the API key attached, without the key ever being an argument. The
+# printf builtin writes the header into a pipe — a builtin runs no program, so
+# the key lands in no argv, and `key` is never exported, so in no environment —
+# and curl inherits the read end as a descriptor it reads as a header file.
+# curl's argv names only that descriptor (-H @/dev/fd/N), and another user
+# cannot open a process's descriptors. Nothing is written to disk, so nothing
+# needs cleaning up: however the request ends — completed, timed out, or the
+# helper killed — the pipe is gone with the processes that hold it.
+#
+# $1 is the API path; any further arguments are passed to curl.
+ovs_curl() {
+  local path="$1"
+  shift
+  curl -sS -H @<(printf 'X-API-Key: %s\n' "$key") "$@" "$base$path" 2>/dev/null
 }
 
 # GET, capped by reading at most one byte past the ceiling: that extra byte is
@@ -54,9 +79,7 @@ ovs_load_config() {
 # existing error handling reports.
 ovs_get() {
   local body
-  body=$(curl -sS --max-time 12 \
-      -H "X-API-Key: $key" "$base$1" 2>/dev/null \
-      | head -c "$((OVS_MAX_BYTES + 1))")
+  body=$(ovs_curl "$1" --max-time 12 | head -c "$((OVS_MAX_BYTES + 1))")
   if (( $(ovs_bytes "$body") > OVS_MAX_BYTES )); then
     jq -nc '{ok: false, error: "response-too-large"}'
     return 0
@@ -68,15 +91,15 @@ ovs_get() {
 # (202) and a refusal (409 no destination, 422 unusable number) both come back
 # as JSON, and only the code tells them apart. Capped the same way; an oversized
 # body is reported as a synthetic 413 so the caller's status parsing still works
-# (the real status is lost with the body we refused to read).
+# (the real status is lost with the body we refused to read). The request body
+# carries the dialled number, so curl reads it from stdin (--data-binary @-).
 ovs_post() {
   local raw
-  raw=$(curl -sS --max-time 20 -X POST \
-    -H "X-API-Key: $key" \
-    -H "Content-Type: application/json" \
-    -d "$2" \
-    -w $'\n%{http_code}' \
-    "$base$1" 2>/dev/null \
+  raw=$(printf '%s' "$2" \
+    | ovs_curl "$1" --max-time 20 -X POST \
+        -H "Content-Type: application/json" \
+        --data-binary @- \
+        -w $'\n%{http_code}' \
     | head -c "$((OVS_MAX_BYTES + 1))")
   if (( $(ovs_bytes "$raw") > OVS_MAX_BYTES )); then
     printf '%s\n413' '{"ok":false,"error":"response-too-large"}'

@@ -7,8 +7,8 @@
 #   {"ok":false, "error":"no-key"}
 #
 # Config, auth and the HTTP helpers live in ovs-lib.sh, shared with
-# ovs-test-call. The API key is read from the config file rather than passed
-# in argv, so it never shows up in the process table.
+# ovs-test-call. Neither the API key nor any response data is passed in argv,
+# so none of it shows up in the process table.
 
 set -uo pipefail
 
@@ -25,7 +25,11 @@ live=$(ovs_get "/customer/live-calls")
 jq -e 'type == "object" and (has("items") or has("active_count"))' \
   <<<"$live" >/dev/null 2>&1 || live="null"
 
-jq -nc --argjson d "$dash" --argjson l "$live" '
+# Both bodies reach jq on stdin rather than as --argjson arguments: they carry
+# call data, which has no place in a world-readable argv, and Linux caps a
+# single argument at 128 KiB, half of what OVS_MAX_BYTES admits.
+printf '%s\n%s\n' "$dash" "$live" | jq -nc '
+  input as $d | input as $l |
   if ($d | type) == "object" and $d.calls_today != null then
     { ok: true, dashboard: $d, live: (if ($l | type) == "object" then $l else null end) }
   else
