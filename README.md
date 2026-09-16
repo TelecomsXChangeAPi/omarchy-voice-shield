@@ -191,6 +191,13 @@ All authenticate with `X-API-Key`. The dialled number is passed to
 world-readable and `/proc/PID/environ` is not, and a number someone is calling
 is not something to hand to every other process on the machine.
 
+Every response is read under a hard **256 KiB** ceiling (`OVS_MAX_BYTES`) and
+rejected outright if it exceeds it, rather than truncated — a compromised
+endpoint, a redirected `baseUrl`, or an intermediary cannot grow the helper or
+the shell that collects its output. Error text lifted out of a body is capped at
+200 characters, and no `Accept-Encoding` is ever sent, so there is no
+decompression path to inflate a small body into a large one.
+
 ## Notes on the chart
 
 High-risk calls run at roughly 0.5–2.5% of daily volume. Stacked inside the

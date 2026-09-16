@@ -11,6 +11,20 @@
 OVS_CONFIG_PATH="${OVS_CONFIG:-$HOME/.config/omarchy/ovs.json}"
 OVS_DEFAULT_BASE="https://ovs.telecomsxchange.com/api"
 
+# Hard ceiling on any response body we will hold in memory. A hostile or broken
+# endpoint — a compromised API, a `baseUrl` pointed elsewhere, or an
+# intermediary — must not be able to grow this helper, or the shell that
+# collects our stdout, without bound. `--max-time` alone does not bound size.
+#
+# Oversized responses are rejected outright rather than truncated: half a body
+# is not valid JSON, and acting on a partial answer is worse than failing. We
+# never send Accept-Encoding, so curl performs no decompression and this ceiling
+# applies to the bytes on the wire rather than to an inflated body.
+OVS_MAX_BYTES="${OVS_MAX_BYTES:-262144}"   # 256 KiB
+
+# Byte length of a string, independent of locale/multibyte settings.
+ovs_bytes() { printf '%s' "$1" | LC_ALL=C wc -c; }
+
 ovs_fail() { jq -nc --arg e "$1" '{ok: false, error: $e}'; exit 0; }
 
 # Sets `key`, `base` and `days` for the caller, or exits with an error object.
@@ -29,23 +43,54 @@ ovs_load_config() {
   [[ "$days" =~ ^[0-9]+$ ]] || days=7
 }
 
-ovs_get() { curl -sS --max-time 12 -H "X-API-Key: $key" "$base$1" 2>/dev/null; }
+# GET, capped by reading at most one byte past the ceiling: that extra byte is
+# what distinguishes "too large" from "exactly at the limit", and closing the
+# pipe there kills the transfer. This single read cap is the guarantee, and it
+# holds for every shape of response — chunked, close-delimited, or one whose
+# declared Content-Length lies. (curl's own --max-filesize is deliberately not
+# used: it only helps when the peer declares its size honestly, and when it
+# fires it yields an empty body indistinguishable from a network error.)
+# An over-limit answer becomes a small rejection object, which the callers'
+# existing error handling reports.
+ovs_get() {
+  local body
+  body=$(curl -sS --max-time 12 \
+      -H "X-API-Key: $key" "$base$1" 2>/dev/null \
+      | head -c "$((OVS_MAX_BYTES + 1))")
+  if (( $(ovs_bytes "$body") > OVS_MAX_BYTES )); then
+    jq -nc '{ok: false, error: "response-too-large"}'
+    return 0
+  fi
+  printf '%s' "$body"
+}
 
 # POST with the HTTP status appended on its own final line: a queued test call
 # (202) and a refusal (409 no destination, 422 unusable number) both come back
-# as JSON, and only the code tells them apart.
+# as JSON, and only the code tells them apart. Capped the same way; an oversized
+# body is reported as a synthetic 413 so the caller's status parsing still works
+# (the real status is lost with the body we refused to read).
 ovs_post() {
-  curl -sS --max-time 20 -X POST \
+  local raw
+  raw=$(curl -sS --max-time 20 -X POST \
     -H "X-API-Key: $key" \
     -H "Content-Type: application/json" \
     -d "$2" \
     -w $'\n%{http_code}' \
-    "$base$1" 2>/dev/null
+    "$base$1" 2>/dev/null \
+    | head -c "$((OVS_MAX_BYTES + 1))")
+  if (( $(ovs_bytes "$raw") > OVS_MAX_BYTES )); then
+    printf '%s\n413' '{"ok":false,"error":"response-too-large"}'
+    return 0
+  fi
+  printf '%s' "$raw"
 }
 
 # The human-readable half of an error body. FastAPI answers with {"detail": …},
 # where detail is a string for a deliberate refusal and a list of field errors
-# for a validation failure; both get flattened to one line.
+# for a validation failure; both get flattened to one line. The result is kept
+# short: an error body is still attacker-influenced text that ends up on screen,
+# so only a small bounded message is carried out of here.
+OVS_MAX_ERROR_CHARS=200
 ovs_error_message() {
   jq -r '
     if (.detail? | type) == "array" then
@@ -53,5 +98,5 @@ ovs_error_message() {
     elif .detail? then (.detail | tostring)
     elif .error? then (.error | tostring)
     else empty end
-  ' 2>/dev/null <<<"$1"
+  ' 2>/dev/null <<<"$1" | head -c "$OVS_MAX_ERROR_CHARS" | tr -d '\r\n'
 }

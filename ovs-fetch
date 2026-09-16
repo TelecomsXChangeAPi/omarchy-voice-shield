@@ -18,8 +18,12 @@ ovs_load_config
 dash=$(ovs_get "/customer/dashboard?days=$days")
 jq -e . <<<"$dash" >/dev/null 2>&1 || ovs_fail "unreachable"
 
+# Live calls are optional: anything that is not recognisably a live-calls
+# payload — including the rejection object a too-large response produces — is
+# dropped rather than passed through as if it were one.
 live=$(ovs_get "/customer/live-calls")
-jq -e . <<<"$live" >/dev/null 2>&1 || live="null"
+jq -e 'type == "object" and (has("items") or has("active_count"))' \
+  <<<"$live" >/dev/null 2>&1 || live="null"
 
 jq -nc --argjson d "$dash" --argjson l "$live" '
   if ($d | type) == "object" and $d.calls_today != null then
